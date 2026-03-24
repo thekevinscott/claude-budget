@@ -1,58 +1,45 @@
-"""Capture raw response from the Anthropic usage endpoint.
+"""Capture response from the Anthropic usage endpoint.
 
-Saves status code, headers, and body to output/ as timestamped JSON files.
-Run under different account states to map out the response format.
+Uses Claude Code's stored OAuth credentials to authenticate.
+Saves the full response to output/ as timestamped JSON files.
 
 Usage:
     uv run python scripts/capture_usage.py [--label LABEL]
 
-The --label flag adds a suffix to the filename, e.g.:
+Examples:
     uv run python scripts/capture_usage.py --label extra-usage-on
-    uv run python scripts/capture_usage.py --label extra-usage-off
     uv run python scripts/capture_usage.py --label after-reset
 """
 
 import argparse
 import json
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage"
+import httpx
+
+from claude_budget.usage import USAGE_ENDPOINT, _build_headers, load_token
+
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
 
 
-def capture() -> dict:
+def capture(token: str) -> dict:
     """Hit the usage endpoint and capture everything."""
-    req = urllib.request.Request(USAGE_ENDPOINT, headers={
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    })
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body_raw = resp.read()
-            try:
-                body = json.loads(body_raw)
-            except json.JSONDecodeError:
-                body = body_raw.decode("utf-8", errors="replace")
-            return {
-                "status": resp.status,
-                "headers": dict(resp.headers),
-                "body": body,
-            }
-    except urllib.error.HTTPError as e:
-        body_raw = e.read()
-        try:
-            body = json.loads(body_raw)
-        except (json.JSONDecodeError, Exception):
-            body = body_raw.decode("utf-8", errors="replace")
-        return {
-            "status": e.code,
-            "reason": e.reason,
-            "headers": dict(e.headers),
-            "body": body,
+        resp = httpx.get(
+            USAGE_ENDPOINT,
+            headers=_build_headers(token),
+            timeout=15,
+        )
+        result = {
+            "status": resp.status_code,
+            "headers": dict(resp.headers),
         }
+        try:
+            result["body"] = resp.json()
+        except Exception:
+            result["body"] = resp.text
+        return result
     except Exception as e:
         return {
             "status": None,
@@ -66,6 +53,11 @@ def main():
     parser.add_argument("--label", type=str, default=None, help="Label suffix for the output file")
     args = parser.parse_args()
 
+    token = load_token()
+    if token is None:
+        print("Error: No OAuth token found in ~/.claude/.credentials.json")
+        raise SystemExit(1)
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     now = datetime.now(timezone.utc)
@@ -73,7 +65,7 @@ def main():
     suffix = f"-{args.label}" if args.label else ""
     filename = f"usage-{timestamp}{suffix}.json"
 
-    result = capture()
+    result = capture(token)
     result["captured_at"] = now.isoformat()
 
     out_path = OUTPUT_DIR / filename
@@ -81,11 +73,11 @@ def main():
 
     print(f"Status: {result.get('status')}")
     if "headers" in result:
-        retry = result["headers"].get("Retry-After") or result["headers"].get("retry-after")
+        retry = result["headers"].get("retry-after")
         if retry:
             print(f"Retry-After: {retry}s")
     print(f"Saved to: {out_path}")
-    print(json.dumps(result, indent=2, default=str))
+    print(json.dumps(result.get("body", result), indent=2, default=str))
 
 
 if __name__ == "__main__":

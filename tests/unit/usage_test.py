@@ -1,192 +1,256 @@
 """Unit tests for usage limit checking."""
 
+import json
 import time
-import urllib.error
-from unittest.mock import MagicMock, patch
+from datetime import datetime, timezone
+from unittest.mock import patch
+
+import httpx
+import pytest
 
 from claude_budget.usage import (
     UsageStatus,
     check_usage,
+    check_usage_sync,
     format_reset_time,
-    parse_rate_limited_response,
-    parse_retry_after,
+    load_token,
     parse_usage_response,
+    _parse_retry_after,
 )
 
 
-# ── parse_retry_after ──────────────────────────────────────────────
+SAMPLE_RESPONSE = {
+    "five_hour": {
+        "utilization": 30.0,
+        "resets_at": "2026-03-24T22:00:00.060506+00:00",
+    },
+    "seven_day": {
+        "utilization": 87.0,
+        "resets_at": "2026-03-27T17:00:00.060523+00:00",
+    },
+    "seven_day_oauth_apps": None,
+    "seven_day_opus": None,
+    "seven_day_sonnet": {"utilization": 0.0, "resets_at": None},
+    "seven_day_cowork": None,
+    "iguana_necktie": None,
+    "extra_usage": {
+        "is_enabled": True,
+        "monthly_limit": 15000,
+        "used_credits": 14580.0,
+        "utilization": 97.2,
+    },
+}
+
+
+def _mock_response(status_code=200, json_data=None, headers=None):
+    """Build a mock httpx.Response."""
+    return httpx.Response(
+        status_code=status_code,
+        json=json_data,
+        headers=headers or {},
+        request=httpx.Request("GET", "https://test.example.com/usage"),
+    )
+
+
+# ── _parse_retry_after ─────────────────────────────────────────────
 
 
 def test_parse_retry_after_integer():
-    assert parse_retry_after({"Retry-After": "3600"}) == 3600
-
-
-def test_parse_retry_after_case_insensitive():
-    assert parse_retry_after({"retry-after": "120"}) == 120
+    headers = httpx.Headers({"retry-after": "3600"})
+    assert _parse_retry_after(headers) == 3600
 
 
 def test_parse_retry_after_missing():
-    assert parse_retry_after({}) is None
+    headers = httpx.Headers({})
+    assert _parse_retry_after(headers) is None
 
 
 def test_parse_retry_after_non_integer():
-    assert parse_retry_after({"Retry-After": "not-a-number"}) is None
+    headers = httpx.Headers({"retry-after": "not-a-number"})
+    assert _parse_retry_after(headers) is None
 
 
-def test_parse_retry_after_none_value():
-    assert parse_retry_after({"Retry-After": None}) is None
+# ── parse_usage_response ───────────────────────────────────────────
 
 
-# ── parse_usage_response ──────────────────────────────────────────
+def test_parse_usage_response_full():
+    status = parse_usage_response(SAMPLE_RESPONSE)
+    assert status.available is True
+    assert status.five_hour == pytest.approx(0.30)
+    assert status.seven_day == pytest.approx(0.87)
+    assert status.five_hour_resets_at is not None
+    assert status.seven_day_resets_at is not None
+    assert status.extra_usage == SAMPLE_RESPONSE["extra_usage"]
+    assert status.raw_response == SAMPLE_RESPONSE
+    assert status.error is None
 
 
-def test_parse_usage_response_returns_available():
-    data = {"five_hour": 0.3, "seven_day": 0.1}
+def test_parse_usage_response_converts_percentage_to_fraction():
+    data = {"five_hour": {"utilization": 50.0}, "seven_day": {"utilization": 100.0}}
     status = parse_usage_response(data)
+    assert status.five_hour == pytest.approx(0.50)
+    assert status.seven_day == pytest.approx(1.0)
+
+
+def test_parse_usage_response_missing_windows():
+    status = parse_usage_response({})
     assert status.available is True
-    assert status.retry_after_seconds is None
-    assert status.reset_timestamp is None
-    assert status.raw_response == data
-    assert status.error is None
+    assert status.five_hour is None
+    assert status.seven_day is None
 
 
-# ── parse_rate_limited_response ───────────────────────────────────
+def test_parse_usage_response_parses_resets_at():
+    status = parse_usage_response(SAMPLE_RESPONSE)
+    assert status.five_hour_resets_at == datetime(
+        2026, 3, 24, 22, 0, 0, 60506, tzinfo=timezone.utc,
+    )
 
 
-def test_parse_rate_limited_with_retry_after():
-    headers = {"Retry-After": "3416"}
-    status = parse_rate_limited_response(headers)
-    assert status.available is False
-    assert status.retry_after_seconds == 3416
-    assert status.reset_timestamp is not None
-    assert abs(status.reset_timestamp - (time.time() + 3416)) < 2
-    assert status.error is None
+# ── load_token ─────────────────────────────────────────────────────
 
 
-def test_parse_rate_limited_without_retry_after():
-    headers = {}
-    status = parse_rate_limited_response(headers)
-    assert status.available is False
-    assert status.retry_after_seconds is None
-    assert status.reset_timestamp is None
+def test_load_token_valid(tmp_path):
+    creds_file = tmp_path / "credentials.json"
+    creds_file.write_text(json.dumps({
+        "claudeAiOauth": {"accessToken": "test-token-123", "refreshToken": "rt"}
+    }))
+    assert load_token(str(creds_file)) == "test-token-123"
 
 
-# ── check_usage ───────────────────────────────────────────────────
+def test_load_token_missing_file():
+    assert load_token("/nonexistent/path/credentials.json") is None
 
 
-@pytest.fixture
-def mock_urlopen():
-    """Mock urllib.request.urlopen with configurable responses."""
-    with patch("urllib.request.urlopen") as mock:
-
-        def set_response(data: bytes):
-            mock.reset_mock()
-            resp = MagicMock()
-            resp.read.return_value = data
-            resp.__enter__ = MagicMock(return_value=resp)
-            resp.__exit__ = MagicMock(return_value=False)
-            mock.return_value = resp
-            mock.side_effect = None
-
-        def set_rate_limited(retry_after=None):
-            mock.reset_mock()
-            from email.message import Message
-            hdrs = Message()
-            if retry_after is not None:
-                hdrs["Retry-After"] = str(retry_after)
-            mock.side_effect = urllib.error.HTTPError(
-                url="http://example.com", code=429,
-                msg="Too Many Requests", hdrs=hdrs, fp=None,
-            )
-
-        def set_http_error(code, msg):
-            mock.reset_mock()
-            mock.side_effect = urllib.error.HTTPError(
-                url="http://example.com", code=code,
-                msg=msg, hdrs=None, fp=None,
-            )
-
-        def set_error(error):
-            mock.reset_mock()
-            mock.side_effect = error
-
-        mock.set_response = set_response
-        mock.set_rate_limited = set_rate_limited
-        mock.set_http_error = set_http_error
-        mock.set_error = set_error
-        yield mock
+def test_load_token_malformed(tmp_path):
+    creds_file = tmp_path / "credentials.json"
+    creds_file.write_text("not json")
+    assert load_token(str(creds_file)) is None
 
 
-import pytest
+def test_load_token_missing_oauth_key(tmp_path):
+    creds_file = tmp_path / "credentials.json"
+    creds_file.write_text(json.dumps({"other": "data"}))
+    assert load_token(str(creds_file)) is None
 
 
-def test_check_usage_available(mock_urlopen):
-    """200 response means API is available."""
-    mock_urlopen.set_response(b'{"five_hour": 0.3, "seven_day": 0.1}')
-    status = check_usage(endpoint="https://test.example.com/usage")
+# ── check_usage (async) ───────────────────────────────────────────
+
+
+async def test_check_usage_available():
+    with patch("claude_budget.usage.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.get.return_value = _mock_response(200, SAMPLE_RESPONSE)
+        status = await check_usage(token="test-token")
     assert status.available is True
-    assert status.raw_response == {"five_hour": 0.3, "seven_day": 0.1}
+    assert status.five_hour == pytest.approx(0.30)
+    assert status.seven_day == pytest.approx(0.87)
 
 
-def test_check_usage_rate_limited(mock_urlopen):
-    """429 response means rate limited, parse Retry-After."""
-    mock_urlopen.set_rate_limited(retry_after=1800)
-    status = check_usage(endpoint="https://test.example.com/usage")
+async def test_check_usage_sends_auth_headers():
+    with patch("claude_budget.usage.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.get.return_value = _mock_response(200, SAMPLE_RESPONSE)
+        await check_usage(token="my-token")
+        _, kwargs = client.get.call_args
+        assert kwargs["headers"]["Authorization"] == "Bearer my-token"
+        assert kwargs["headers"]["anthropic-beta"] == "oauth-2025-04-20"
+
+
+async def test_check_usage_rate_limited():
+    with patch("claude_budget.usage.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.get.return_value = _mock_response(429, headers={"retry-after": "1800"})
+        status = await check_usage(token="test-token")
     assert status.available is False
     assert status.retry_after_seconds == 1800
     assert status.error is None
 
 
-def test_check_usage_rate_limited_no_retry_after(mock_urlopen):
-    """429 without Retry-After still reports unavailable."""
-    mock_urlopen.set_rate_limited(retry_after=None)
-    status = check_usage(endpoint="https://test.example.com/usage")
+async def test_check_usage_rate_limited_no_retry_after():
+    with patch("claude_budget.usage.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.get.return_value = _mock_response(429)
+        status = await check_usage(token="test-token")
     assert status.available is False
     assert status.retry_after_seconds is None
 
 
-def test_check_usage_server_error(mock_urlopen):
-    """500 response returns error status, not exception."""
-    mock_urlopen.set_http_error(500, "Internal Server Error")
-    status = check_usage(endpoint="https://test.example.com/usage")
+async def test_check_usage_server_error():
+    with patch("claude_budget.usage.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.get.return_value = _mock_response(500)
+        status = await check_usage(token="test-token")
     assert status.available is False
     assert "500" in status.error
 
 
-def test_check_usage_connection_error(mock_urlopen):
-    """Network error returns error status, not exception."""
-    mock_urlopen.set_error(ConnectionError("refused"))
-    status = check_usage(endpoint="https://test.example.com/usage")
+async def test_check_usage_connection_error():
+    with patch("claude_budget.usage.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.get.side_effect = httpx.ConnectError("refused")
+        status = await check_usage(token="test-token")
     assert status.available is False
     assert status.error is not None
 
 
-def test_check_usage_timeout(mock_urlopen):
-    """Timeout returns error status, not exception."""
-    mock_urlopen.set_error(TimeoutError())
-    status = check_usage(endpoint="https://test.example.com/usage")
+async def test_check_usage_timeout():
+    with patch("claude_budget.usage.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.get.side_effect = httpx.TimeoutException("timed out")
+        status = await check_usage(token="test-token")
     assert status.available is False
     assert status.error is not None
 
 
-# ── format_reset_time ─────────────────────────────────────────────
+async def test_check_usage_no_token_raises():
+    with pytest.raises(RuntimeError, match="No OAuth token found"):
+        await check_usage(token=None, credentials_path="/nonexistent/path")
+
+
+# ── check_usage_sync ──────────────────────────────────────────────
+
+
+def test_check_usage_sync_available():
+    with patch("claude_budget.usage.httpx.get") as mock_get:
+        mock_get.return_value = _mock_response(200, SAMPLE_RESPONSE)
+        status = check_usage_sync(token="test-token")
+    assert status.available is True
+    assert status.five_hour == pytest.approx(0.30)
+
+
+def test_check_usage_sync_no_token_raises():
+    with pytest.raises(RuntimeError, match="No OAuth token found"):
+        check_usage_sync(token=None, credentials_path="/nonexistent/path")
+
+
+# ── format_reset_time ──────────────────────────────────────────────
+
+
+def test_format_with_resets_at():
+    resets = datetime(2026, 3, 24, 22, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 3, 24, 20, 30, 0, tzinfo=timezone.utc)
+    with patch("claude_budget.usage.datetime") as mock_dt:
+        mock_dt.now.return_value = now
+        mock_dt.fromisoformat = datetime.fromisoformat
+        status = UsageStatus(available=True, five_hour_resets_at=resets)
+        assert format_reset_time(status) == "Resets in 1h 30m"
 
 
 def test_format_available():
-    status = UsageStatus(available=True, retry_after_seconds=None, reset_timestamp=None, raw_response=None, error=None)
+    status = UsageStatus(available=True)
     assert format_reset_time(status) == "Available now"
 
 
-def test_format_minutes():
-    status = UsageStatus(available=False, retry_after_seconds=1800, reset_timestamp=None, raw_response=None, error=None)
+def test_format_retry_after_minutes():
+    status = UsageStatus(available=False, retry_after_seconds=1800)
     assert format_reset_time(status) == "Resets in 30m"
 
 
-def test_format_hours_and_minutes():
-    status = UsageStatus(available=False, retry_after_seconds=5400, reset_timestamp=None, raw_response=None, error=None)
+def test_format_retry_after_hours():
+    status = UsageStatus(available=False, retry_after_seconds=5400)
     assert format_reset_time(status) == "Resets in 1h 30m"
 
 
 def test_format_unknown():
-    status = UsageStatus(available=False, retry_after_seconds=None, reset_timestamp=None, raw_response=None, error=None)
+    status = UsageStatus(available=False)
     assert format_reset_time(status) == "Unknown reset time"

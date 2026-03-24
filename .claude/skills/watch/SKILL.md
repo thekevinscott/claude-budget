@@ -16,7 +16,7 @@ Run a budget watchdog alongside a background pipeline. The watchdog blocks until
 Parse `$ARGUMENTS` to extract target and optional poll interval. Convert the percentage to a fraction (divide by 100).
 
 ```bash
-uv run --project /home/duncan/work/code/projects/claude-budget claude-budget watch --target <fraction> --poll <seconds>
+uvx --from git+https://github.com/thekevinscott/claude-budget claude-budget watch --target <fraction> --poll <seconds>
 ```
 
 When the command exits, it means the target was reached. Take appropriate action (e.g., kill background pipelines, notify the user).

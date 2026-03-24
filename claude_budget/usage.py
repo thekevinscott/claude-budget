@@ -8,13 +8,17 @@ endpoint are unavailable.
 
 import json
 import os
-from dataclasses import dataclass
+import tempfile
+import time as _time
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
 import httpx
 
 USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage"
 CREDENTIALS_PATH = os.path.expanduser("~/.claude/.credentials.json")
+CACHE_PATH = "/tmp/claude-budget-usage.json"
+CACHE_TTL = 30  # seconds
 REQUEST_TIMEOUT = 10
 
 
@@ -100,6 +104,51 @@ def _parse_rate_limited(headers: httpx.Headers) -> UsageStatus:
     )
 
 
+def _status_to_dict(status: UsageStatus) -> dict:
+    """Serialize UsageStatus to a JSON-safe dict."""
+    d = asdict(status)
+    # Convert datetime fields to ISO strings
+    for key in ("five_hour_resets_at", "seven_day_resets_at"):
+        if d[key] is not None:
+            d[key] = d[key].isoformat()
+    return d
+
+
+def _dict_to_status(d: dict) -> UsageStatus:
+    """Deserialize a dict back to UsageStatus."""
+    for key in ("five_hour_resets_at", "seven_day_resets_at"):
+        if d.get(key) is not None:
+            d[key] = datetime.fromisoformat(d[key])
+    return UsageStatus(**d)
+
+
+def _write_cache(path: str, status: UsageStatus) -> None:
+    """Atomically write a cached usage status."""
+    entry = {"timestamp": _time.time(), "status": _status_to_dict(status)}
+    dir_path = os.path.dirname(path) or "/tmp"
+    try:
+        fd, tmp = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            json.dump(entry, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _read_cache(path: str, max_age: float) -> UsageStatus | None:
+    """Read cached status if fresh enough. Returns None on miss/expired/corrupt."""
+    try:
+        with open(path) as f:
+            entry = json.load(f)
+        ts = entry["timestamp"]
+        status_dict = entry["status"]
+        if _time.time() - ts > max_age:
+            return None
+        return _dict_to_status(status_dict)
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        return None
+
+
 def _build_headers(token: str) -> dict:
     return {
         "Authorization": f"Bearer {token}",
@@ -134,12 +183,20 @@ async def check_usage(
     timeout: int = REQUEST_TIMEOUT,
     token: str | None = None,
     credentials_path: str = CREDENTIALS_PATH,
+    cache_path: str = CACHE_PATH,
+    cache_ttl: float = CACHE_TTL,
 ) -> UsageStatus:
     """Check current Anthropic usage status.
 
     Reads OAuth token from Claude Code's credentials file and hits the
     usage endpoint. Returns UsageStatus; never raises (except for missing credentials).
+    Results are cached to disk for cache_ttl seconds to reduce endpoint load
+    across concurrent processes. Set cache_ttl=0 to bypass.
     """
+    if cache_ttl > 0:
+        cached = _read_cache(cache_path, cache_ttl)
+        if cached is not None:
+            return cached
     token = _resolve_token(token, credentials_path)
     try:
         async with httpx.AsyncClient() as client:
@@ -148,9 +205,12 @@ async def check_usage(
                 headers=_build_headers(token),
                 timeout=timeout,
             )
-            return _handle_response(resp)
+            status = _handle_response(resp)
     except Exception as e:
-        return UsageStatus(available=False, error=str(e))
+        status = UsageStatus(available=False, error=str(e))
+    if cache_ttl > 0:
+        _write_cache(cache_path, status)
+    return status
 
 
 def check_usage_sync(
@@ -158,8 +218,14 @@ def check_usage_sync(
     timeout: int = REQUEST_TIMEOUT,
     token: str | None = None,
     credentials_path: str = CREDENTIALS_PATH,
+    cache_path: str = CACHE_PATH,
+    cache_ttl: float = CACHE_TTL,
 ) -> UsageStatus:
     """Synchronous version of check_usage for scripts and non-async contexts."""
+    if cache_ttl > 0:
+        cached = _read_cache(cache_path, cache_ttl)
+        if cached is not None:
+            return cached
     token = _resolve_token(token, credentials_path)
     try:
         resp = httpx.get(
@@ -167,9 +233,12 @@ def check_usage_sync(
             headers=_build_headers(token),
             timeout=timeout,
         )
-        return _handle_response(resp)
+        status = _handle_response(resp)
     except Exception as e:
-        return UsageStatus(available=False, error=str(e))
+        status = UsageStatus(available=False, error=str(e))
+    if cache_ttl > 0:
+        _write_cache(cache_path, status)
+    return status
 
 
 def format_reset_time(status: UsageStatus) -> str:

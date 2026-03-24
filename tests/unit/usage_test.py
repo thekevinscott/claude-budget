@@ -140,7 +140,7 @@ async def test_check_usage_available():
     with patch("claude_budget.usage.httpx.AsyncClient") as MockClient:
         client = MockClient.return_value.__aenter__.return_value
         client.get.return_value = _mock_response(200, SAMPLE_RESPONSE)
-        status = await check_usage(token="test-token")
+        status = await check_usage(token="test-token", cache_ttl=0)
     assert status.available is True
     assert status.five_hour == pytest.approx(0.30)
     assert status.seven_day == pytest.approx(0.87)
@@ -150,7 +150,7 @@ async def test_check_usage_sends_auth_headers():
     with patch("claude_budget.usage.httpx.AsyncClient") as MockClient:
         client = MockClient.return_value.__aenter__.return_value
         client.get.return_value = _mock_response(200, SAMPLE_RESPONSE)
-        await check_usage(token="my-token")
+        await check_usage(token="my-token", cache_ttl=0)
         _, kwargs = client.get.call_args
         assert kwargs["headers"]["Authorization"] == "Bearer my-token"
         assert kwargs["headers"]["anthropic-beta"] == "oauth-2025-04-20"
@@ -160,7 +160,7 @@ async def test_check_usage_rate_limited():
     with patch("claude_budget.usage.httpx.AsyncClient") as MockClient:
         client = MockClient.return_value.__aenter__.return_value
         client.get.return_value = _mock_response(429, headers={"retry-after": "1800"})
-        status = await check_usage(token="test-token")
+        status = await check_usage(token="test-token", cache_ttl=0)
     assert status.available is False
     assert status.retry_after_seconds == 1800
     assert status.error is None
@@ -170,7 +170,7 @@ async def test_check_usage_rate_limited_no_retry_after():
     with patch("claude_budget.usage.httpx.AsyncClient") as MockClient:
         client = MockClient.return_value.__aenter__.return_value
         client.get.return_value = _mock_response(429)
-        status = await check_usage(token="test-token")
+        status = await check_usage(token="test-token", cache_ttl=0)
     assert status.available is False
     assert status.retry_after_seconds is None
 
@@ -179,7 +179,7 @@ async def test_check_usage_server_error():
     with patch("claude_budget.usage.httpx.AsyncClient") as MockClient:
         client = MockClient.return_value.__aenter__.return_value
         client.get.return_value = _mock_response(500)
-        status = await check_usage(token="test-token")
+        status = await check_usage(token="test-token", cache_ttl=0)
     assert status.available is False
     assert "500" in status.error
 
@@ -188,7 +188,7 @@ async def test_check_usage_connection_error():
     with patch("claude_budget.usage.httpx.AsyncClient") as MockClient:
         client = MockClient.return_value.__aenter__.return_value
         client.get.side_effect = httpx.ConnectError("refused")
-        status = await check_usage(token="test-token")
+        status = await check_usage(token="test-token", cache_ttl=0)
     assert status.available is False
     assert status.error is not None
 
@@ -197,14 +197,14 @@ async def test_check_usage_timeout():
     with patch("claude_budget.usage.httpx.AsyncClient") as MockClient:
         client = MockClient.return_value.__aenter__.return_value
         client.get.side_effect = httpx.TimeoutException("timed out")
-        status = await check_usage(token="test-token")
+        status = await check_usage(token="test-token", cache_ttl=0)
     assert status.available is False
     assert status.error is not None
 
 
 async def test_check_usage_no_token_raises():
     with pytest.raises(RuntimeError, match="No OAuth token found"):
-        await check_usage(token=None, credentials_path="/nonexistent/path")
+        await check_usage(token=None, credentials_path="/nonexistent/path", cache_ttl=0)
 
 
 # ── check_usage_sync ──────────────────────────────────────────────
@@ -213,14 +213,14 @@ async def test_check_usage_no_token_raises():
 def test_check_usage_sync_available():
     with patch("claude_budget.usage.httpx.get") as mock_get:
         mock_get.return_value = _mock_response(200, SAMPLE_RESPONSE)
-        status = check_usage_sync(token="test-token")
+        status = check_usage_sync(token="test-token", cache_ttl=0)
     assert status.available is True
     assert status.five_hour == pytest.approx(0.30)
 
 
 def test_check_usage_sync_no_token_raises():
     with pytest.raises(RuntimeError, match="No OAuth token found"):
-        check_usage_sync(token=None, credentials_path="/nonexistent/path")
+        check_usage_sync(token=None, credentials_path="/nonexistent/path", cache_ttl=0)
 
 
 # ── format_reset_time ──────────────────────────────────────────────

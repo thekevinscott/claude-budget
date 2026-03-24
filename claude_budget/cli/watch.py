@@ -52,9 +52,11 @@ def watch(
             continue
 
         if not status.available:
-            print(f"BUDGET EXCEEDED (rate limited). {format_reset_time(status)}", file=sys.stderr)
-            print("exceeded")
-            raise SystemExit(0)
+            # 429 on the monitoring endpoint is transient — don't trust it as
+            # "budget exhausted."  Only real utilization numbers trigger exit.
+            print(f"Warning: rate limited on usage endpoint. {format_reset_time(status)}", file=sys.stderr)
+            time.sleep(poll)
+            continue
 
         if status.five_hour is not None and status.five_hour >= target:
             pct = status.five_hour * 100

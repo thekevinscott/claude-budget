@@ -1,17 +1,14 @@
-"""CLI entrypoint for claude-budget.
+"""claude-budget usage -- show current usage status."""
 
-Usage:
-    claude-budget usage     Show current usage status
-"""
-
-import argparse
 import sys
 
+from claude_budget.cli import app
 from claude_budget.usage import check_usage_sync, format_reset_time
 
 
-def cmd_usage(args):
-    """Print current usage status."""
+@app.command
+def usage():
+    """Show current Anthropic usage status."""
     try:
         status = check_usage_sync()
     except RuntimeError as e:
@@ -51,20 +48,3 @@ def cmd_usage(args):
         lines.append(f"Extra usage: {enabled}  ${used:.0f}/${limit:.0f} ({util:.1f}%)")
 
     print("\n".join(lines))
-
-
-def main():
-    parser = argparse.ArgumentParser(prog="claude-budget", description="Anthropic usage budget management")
-    sub = parser.add_subparsers(dest="command")
-    sub.add_parser("usage", help="Show current usage status")
-
-    args = parser.parse_args()
-    if args.command == "usage":
-        cmd_usage(args)
-    else:
-        parser.print_help()
-        raise SystemExit(1)
-
-
-if __name__ == "__main__":
-    main()

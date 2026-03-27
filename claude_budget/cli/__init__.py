@@ -13,4 +13,4 @@ def main():
 
 
 # Import commands to register them
-from claude_budget.cli import usage, watch  # noqa: E402, F401
+from claude_budget.cli import watch  # noqa: E402, F401

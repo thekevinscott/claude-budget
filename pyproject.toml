@@ -1,7 +1,7 @@
 [project]
 name = "claude-budget"
 version = "0.1.0"
-description = "Usage budget management for the Anthropic Agent SDK"
+description = "CLI watchdog for Anthropic usage budget monitoring"
 requires-python = ">=3.14"
 dependencies = [
     "cyclopts>=4.10.1",

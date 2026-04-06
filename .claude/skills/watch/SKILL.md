@@ -21,9 +21,11 @@ uvx --from git+https://github.com/thekevinscott/claude-budget claude-budget watc
 
 When the command exits, it means the target was reached. Take appropriate action (e.g., kill background pipelines, notify the user).
 
+Every poll is logged as JSONL to `/tmp/claude-budget-watch.jsonl` (override with `--log <path>`). If something goes wrong, read the log for post-mortem analysis.
+
 ## Example Agent Workflow
 
 1. Start the pipeline in the background
 2. Start the watchdog in the background: `claude-budget watch --target 0.85 --poll 60`
 3. When the watchdog exits, kill the pipeline
-4. Report results to the user
+4. Report results to the user (read `/tmp/claude-budget-watch.jsonl` if needed for diagnostics)

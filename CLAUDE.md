@@ -1,6 +1,12 @@
 # claude-budget
 
-Usage budget management for the Anthropic Agent SDK.
+CLI watchdog for Anthropic usage budget monitoring.
+
+## Usage Endpoint Behavior
+
+The endpoint `api.anthropic.com/api/oauth/usage` returns 429 responses that are **entirely unrelated to budget utilization**. You can be at 24% usage and get a 429. The 429 is a rate limit on the endpoint itself (too many monitoring calls), not a signal that budget is exhausted. The only trustworthy signal is a 200 response with actual utilization numbers. Treat all 429s as transient — log them and keep polling.
+
+**Critical limitation (tested 2026-03-31):** The endpoint becomes completely unavailable while Claude Code is actively making API calls. In a test run, 200 `claude -p 1+1` calls with 2s gaps caused the usage endpoint to return nothing but 429s for the entire ~20 minute duration. The watch got 23 successful polls at 0% utilization, then was blind for the rest. This means the watch is unable to monitor during the exact period when monitoring matters. The endpoint appears to share a rate limit budget with the Claude API itself, or has an extremely low standalone rate limit that any concurrent activity trips.
 
 ## Permissions & Sandbox
 

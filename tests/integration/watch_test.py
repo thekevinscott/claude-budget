@@ -4,7 +4,7 @@ Tests the full watch flow with mocked usage endpoint responses,
 verifying that the CLI correctly transitions between polling and exit.
 """
 
-import io
+import json
 import time
 from unittest.mock import patch
 
@@ -110,3 +110,41 @@ def describe_watch_polling():
             watch(target=0.85, poll=1)
 
         assert exc_info.value.code == 1
+
+    def it_writes_jsonl_log_when_log_path_given(tmp_path):
+        """Watch should write one JSONL entry per poll to the log file."""
+        log_file = tmp_path / "watch.jsonl"
+        statuses = [
+            _make_status(five_hour=0.50),
+            _make_status(available=False, retry_after=60),
+            _make_status(five_hour=0.90),
+        ]
+        call_count = 0
+
+        def mock_check():
+            nonlocal call_count
+            status = statuses[min(call_count, len(statuses) - 1)]
+            call_count += 1
+            return status
+
+        with (
+            patch("claude_budget.cli.watch.check_usage_sync", side_effect=mock_check),
+            patch("claude_budget.cli.watch.time.sleep"),
+            pytest.raises(SystemExit),
+        ):
+            from claude_budget.cli.watch import watch
+            watch(target=0.85, poll=1, log=str(log_file))
+
+        lines = log_file.read_text().strip().split("\n")
+        assert len(lines) == 3
+
+        entries = [json.loads(line) for line in lines]
+        assert entries[0]["event"] == "poll"
+        assert entries[0]["five_hour"] == 0.50
+        assert entries[1]["event"] == "rate_limited"
+        assert entries[2]["event"] == "target_reached"
+        assert entries[2]["five_hour"] == 0.90
+
+        # Each entry should have a timestamp
+        for entry in entries:
+            assert "timestamp" in entry

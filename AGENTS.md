@@ -71,3 +71,5 @@ uv run pytest tests/e2e/ -v           # E2E tests (uses curtaincall)
 ## Credential Isolation
 
 Never read `~/.gitconfig`, SSH private keys, credential files, or shell config. Never echo environment variables containing secrets.
+
+@docs/internals/session-handoff.md
